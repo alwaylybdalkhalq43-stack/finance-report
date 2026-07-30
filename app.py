@@ -58,16 +58,13 @@ st.sidebar.header("📁 إدارة البيانات والملفات")
 uploaded_file = st.sidebar.file_uploader("ارفع ملف الأكسل أو CSV الخاص بك:", type=["xlsx", "xls", "csv"])
 
 # ---------------------------------------------------------
-# دوال معالجة وتحميل البيانات
+# دوال معالجة وتحميل البيانات (ذكية وعالمية)
 # ---------------------------------------------------------
 def find_header_row(df_raw: pd.DataFrame) -> int:
     for idx, row in df_raw.iterrows():
         row_str = str(row.values).lower()
         looks_like_header = (
-            "date" in row_str
-            or "التاريخ" in str(row.values)
-            or "day" in row_str
-            or idx < 3
+            "date" in row_str or "التاريخ" in str(row.values) or "day" in row_str or "month" in row_str or idx < 3
         )
         if looks_like_header and len(row.dropna()) >= 2:
             return idx
@@ -76,8 +73,9 @@ def find_header_row(df_raw: pd.DataFrame) -> int:
 def detect_date_column(df: pd.DataFrame) -> str:
     for col in df.columns:
         col_lower = str(col).lower()
-        if "date" in col_lower or "التاريخ" in str(col) or "day" in col_lower:
+        if "date" in col_lower or "التاريخ" in str(col) or "day" in col_lower or "month" in col_lower or "time" in col_lower:
             return col
+    # إن لم يجد عمود تاريخ صريح، يأخذ أول عمود
     return df.columns[0]
 
 @st.cache_data
@@ -105,8 +103,14 @@ def load_and_clean_data(file_source) -> pd.DataFrame:
     df = df.loc[:, ~df.columns.astype(str).str.contains(r"^Unnamed")]
 
     date_col = detect_date_column(df)
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    df = df.dropna(subset=[date_col]).sort_values(date_col).reset_index(drop=True)
+    
+    # محاولة تحويل عمود التاريخ لتاريخ صحيح، وإن فشل يحافظ على النصوص لتجنب الأخطاء
+    try:
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+        df = df.dropna(subset=[date_col]).sort_values(date_col).reset_index(drop=True)
+    except:
+        pass
+        
     df.attrs["date_col"] = date_col
     return df
 
@@ -134,14 +138,15 @@ if df is None:
 else:
     date_col = df.attrs.get("date_col", df.columns[0])
     
+    # تحويل كافة الأعمدة غير الرقمية (ما عدا عمود التاريخ) إلى أرقام لتجنب أي مشاكل
+    for col in df.columns:
+        if col != date_col:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
     if not numeric_cols:
-        for col in df.columns[1:]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-        numeric_cols = df.select_dtypes(include="number").columns.tolist()
+        numeric_cols = [c for c in df.columns if c != date_col]
 
-    col1 = numeric_cols[0] if len(numeric_cols) > 0 else df.columns[1]
-    
     st.sidebar.header("🎛️ خيارات التحليل المتقدم")
     selected_metric = st.sidebar.selectbox("اختر المؤشر الرئيسي للتحليل:", numeric_cols, index=0)
     
@@ -157,14 +162,21 @@ else:
     max_val = df[selected_metric].max()
     min_val = df[selected_metric].min()
 
+    # استخراج أفضل تاريخ أو عنصر سُميت به القيمة العظمى ذكياً
+    try:
+        max_row = df.loc[df[selected_metric].idxmax()]
+        best_time_label = str(max_row[date_col]).split()[0]
+    except:
+        best_time_label = "فترة الذروة"
+
     # 1) التحليل البصري (Plotly)
     st.subheader("أولاً: التحليل البصري التفاعلي للأداء")
     
     fig = px.line(
         df, x=date_col, y=selected_metric,
         markers=True,
-        labels={selected_metric: "القيمة / الرصيد", date_col: "النطاق الزمني"},
-        title=f"حركة الأداء الزمني لـ: {selected_metric}"
+        labels={selected_metric: "القيمة / المؤشر", date_col: "النطاق الزمني"},
+        title=f"حركة الأداء لـ: {selected_metric}"
     )
     fig.update_traces(line=dict(width=3, color="#2563eb"), marker=dict(size=6, color="#2563eb"))
     
@@ -192,20 +204,22 @@ else:
     with c2:
         st.metric(label="المتوسط الحسابي", value=f"{avg_val:,.2f}")
     with c3:
-        st.metric(label="القيمة العظمى العليا", value=f"{max_val:,.2f}")
+        st.metric(label="القيمة العليا (الذروة)", value=f"{max_val:,.2f}")
     with c4:
-        st.metric(label="القيمة الصغرى الدنيا", value=f"{min_val:,.2f}")
+        st.metric(label="القيمة الدنيا", value=f"{min_val:,.2f}")
 
-    # 3) القراءة التحليلية والتوصيات
+    # 3) القراءة التحليلية الذكية والتلقائية
     st.subheader("ثالثاً: القراءة التحليلية والتوصيات التنفيذية")
     analysis_text = f"""
-    أظهرت البيانات المعالجة استقراراً ملحوظاً ضمن النطاق المستهدف لعمود <strong>{selected_metric}</strong>، حيث سجلت أعلى قيمة بواقع <strong>{max_val:,.2f}</strong> بينما بلغ أدنى مستوى نحو <strong>{min_val:,.2f}</strong>، ليستقر المتوسط الحسابي عند <strong>{avg_val:,.2f}</strong>.<br><br>
-    <strong>التوصية الإدارية:</strong> يوصى برفع وتيرة المتابعة اليومية للمؤشرات الحيوية لضمان كفاءة التدفقات وتحسين معدلات الأداء التشغيلي العام.
+    أظهرت البيانات المحدثة استقراراً وتحليلاً تفاعلياً لـ <strong>{selected_metric}</strong>، حيث بلغ إجمالي الحجم الكلي <strong>{total_val:,.2f}</strong> بمتوسط حسابي يستقر عند <strong>{avg_val:,.2f}</strong>.<br>
+    • سجل المؤشر <strong>أعلى أداء (ذروة)</strong> بواقع <strong>{max_val:,.2f}</strong> بتاريخ أو نقطة قياس <strong>{best_time_label}</strong>.<br>
+    • بلغ أدنى مستوى مسجل نحو <strong>{min_val:,.2f}</strong>.<br><br>
+    <strong>التوصية الإدارية:</strong> يوصى بدراسة العوامل التي ساهمت في تحقيق الذروة بتاريخ {best_time_label} لتعميم التجارب الناجحة، مع متابعة الفترات المنخفضة لتحسين كفاءة التشغيل.
     """
     
     st.markdown(f"""
     <div style="background-color: #f8fafc; border-right: 5px solid #059669; padding: 20px 25px; border-radius: 0 12px 12px 0; line-height: 1.9; font-size: 15px; color: #334155; border: 1px solid #e2e8f0; box-shadow: 0 2px 8px rgba(0,0,0,0.01);">
-        <strong>قراءة تنفيذية متقدمة:</strong> {analysis_text}
+        <strong>قراءة تنفيذية ذكية:</strong> {analysis_text}
     </div>
     """, unsafe_allow_html=True)
 
@@ -216,7 +230,6 @@ else:
     st.sidebar.markdown("---")
     st.sidebar.header("🖨️ التصدير والطباعة الرسمية")
     
-    # بناء محتوى HTML للتقرير القابل للحفظ كـ PDF عبر المتصفح
     html_export_content = f"""
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
@@ -255,11 +268,11 @@ else:
                 <div class="value">{avg_val:,.2f}</div>
             </div>
             <div class="stat-card">
-                <div class="title">القيمة العظمى العليا</div>
+                <div class="title">القيمة العليا (الذروة)</div>
                 <div class="value">{max_val:,.2f}</div>
             </div>
             <div class="stat-card">
-                <div class="title">القيمة الصغرى الدنيا</div>
+                <div class="title">القيمة الدنيا</div>
                 <div class="value">{min_val:,.2f}</div>
             </div>
         </div>
